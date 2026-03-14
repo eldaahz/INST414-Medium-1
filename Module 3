@@ -1,1 +1,226 @@
-
+ 
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics.pairwise import euclidean_distances
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+ 
+print("="*70)
+print("HOSPITAL SIMILARITY ANALYSIS")
+print("="*70)
+ 
+# 1. LOAD DATA
+ 
+print("\n[1/8] Loading data...")
+df = pd.read_csv('Hospital_General_Information.csv')
+print(f" Loaded {len(df):,} hospitals from {df['State'].nunique()} states")
+ 
+# 2. FILTER TO MARYLAND
+ 
+print("\n[2/8] Filtering to Maryland...")
+md = df[df['State'] == 'MD'].copy()
+md_clean = md[md['Hospital overall rating'] != 'Not Available'].copy()
+print(f" {len(md_clean)} Maryland hospitals with valid ratings")
+ 
+# 3. CLEAN DATA
+ 
+print("\n[3/8] Cleaning data...")
+ 
+# Convert rating to numeric
+md_clean['Hospital overall rating'] = pd.to_numeric(
+    md_clean['Hospital overall rating'], errors='coerce')
+ 
+# Convert measure counts to numeric
+measure_cols = [
+    'Count of MORT Measures Better', 'Count of MORT Measures No Different', 
+    'Count of MORT Measures Worse', 'Count of Safety Measures Better', 
+    'Count of Safety Measures No Different', 'Count of Safety Measures Worse',
+    'Count of READM Measures Better', 'Count of READM Measures No Different', 
+    'Count of READM Measures Worse', 'Count of Facility Pt Exp Measures'
+]
+ 
+for col in measure_cols:
+    md_clean[col] = pd.to_numeric(md_clean[col], errors='coerce')
+ 
+md_clean[measure_cols] = md_clean[measure_cols].fillna(0)
+ 
+# Create binary features
+md_clean['Emergency Services Binary'] = (md_clean['Emergency Services'] == 'Yes').astype(int)
+md_clean['Birthing Friendly Binary'] = (
+    md_clean['Meets criteria for birthing friendly designation'] == 'Y').astype(int)
+ 
+md_clean = md_clean.reset_index(drop=True)
+print("Data cleaned")
+ 
+# 4. EXTRACT FEATURES
+ 
+print("\n[4/8] Extracting 13 features...")
+ 
+feature_cols = [
+    'Hospital overall rating',
+    'Count of MORT Measures Better', 'Count of MORT Measures No Different', 
+    'Count of MORT Measures Worse', 'Count of Safety Measures Better', 
+    'Count of Safety Measures No Different', 'Count of Safety Measures Worse',
+    'Count of READM Measures Better', 'Count of READM Measures No Different', 
+    'Count of READM Measures Worse', 'Count of Facility Pt Exp Measures',
+    'Emergency Services Binary', 'Birthing Friendly Binary'
+]
+ 
+feature_matrix = md_clean[feature_cols].copy()
+print(f" Feature matrix: {feature_matrix.shape}")
+ 
+# 5. STANDARDIZE & CALCULATE DISTANCES
+ 
+print("\n[5/8] Calculating Euclidean distances...")
+ 
+scaler = StandardScaler()
+features_scaled = scaler.fit_transform(feature_matrix)
+distance_matrix = euclidean_distances(features_scaled)
+ 
+print(f" Distance matrix: {distance_matrix.shape}")
+print(f"  Range: [{distance_matrix.min():.2f}, {distance_matrix.max():.2f}]")
+ 
+# 6. FIND TOP 10 FOR QUERY HOSPITALS
+ 
+print("\n[6/8] Finding top 10 similar hospitals...")
+ 
+query_hospitals = [
+    {'id': '210008', 'name': 'MERCY MEDICAL CENTER INC', 'rating': 4},
+    {'id': '210003', 'name': 'UNIVERSITY OF MD CAPITAL REGION MEDICAL CENTER', 'rating': 3},
+    {'id': '210001', 'name': 'MERITUS MEDICAL CENTER', 'rating': 2}
+]
+ 
+def get_top_10(query_id, df, dist_matrix):
+    query_idx = df[df['Facility ID'] == query_id].index[0]
+    distances = dist_matrix[query_idx]
+    top_indices = np.argsort(distances)[1:11]
+    
+    results = df.loc[top_indices, [
+        'Facility ID', 'Facility Name', 'City/Town', 
+        'Hospital overall rating']].copy()
+    results['Euclidean Distance'] = distances[top_indices]
+    results['Rank'] = range(1, 11)
+    results = results[['Rank', 'Facility Name', 'City/Town', 
+                       'Hospital overall rating', 'Euclidean Distance', 'Facility ID']]
+    return results
+ 
+all_results = {}
+for query in query_hospitals:
+    results = get_top_10(query['id'], md_clean, distance_matrix)
+    all_results[query['name']] = results
+    print(f" Query: {query['name']} ({query['rating']}★)")
+ 
+# 7. CREATE VISUALIZATIONS
+ 
+print("\n[7/8] Creating visualizations...")
+ 
+sns.set_style("whitegrid")
+ 
+# Figure 1: Distance Distribution
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+ 
+upper_triangle = np.triu_indices_from(distance_matrix, k=1)
+distances_flat = distance_matrix[upper_triangle]
+ 
+axes[0].hist(distances_flat, bins=30, edgecolor='black', alpha=0.7, color='steelblue')
+axes[0].set_xlabel('Euclidean Distance', fontsize=12)
+axes[0].set_ylabel('Frequency', fontsize=12)
+axes[0].set_title('Distribution of Hospital Similarity\n(Lower Distance = More Similar)', 
+                  fontsize=13, fontweight='bold')
+axes[0].axvline(distances_flat.mean(), color='red', linestyle='--', 
+                label=f'Mean: {distances_flat.mean():.2f}')
+axes[0].legend()
+ 
+# Rating vs Average Distance (FIXED VERSION)
+rating_stats_list = []
+for rating in sorted(md_clean['Hospital overall rating'].unique()):
+    hospitals = md_clean[md_clean['Hospital overall rating'] == rating]
+    if len(hospitals) > 1:
+        indices = hospitals.index.tolist()
+        rating_dist = distance_matrix[np.ix_(indices, indices)]
+        mask = ~np.eye(rating_dist.shape[0], dtype=bool)
+        avg_dist = rating_dist[mask].mean()
+        rating_stats_list.append({
+            'Rating': rating, 
+            'Avg Distance': avg_dist, 
+            'Count': len(hospitals)
+        })
+ 
+rating_stats = pd.DataFrame(rating_stats_list)
+ 
+colors = ['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4']
+axes[1].bar(rating_stats['Rating'], rating_stats['Avg Distance'], 
+            color=colors[:len(rating_stats)], edgecolor='black', alpha=0.7)
+axes[1].set_xlabel('Hospital Overall Rating (Stars)', fontsize=12)
+axes[1].set_ylabel('Average Distance Within Tier', fontsize=12)
+axes[1].set_title('Average Similarity Within Each Rating Tier\n(Lower = More Similar)', 
+                  fontsize=13, fontweight='bold')
+axes[1].set_xticks(rating_stats['Rating'])
+ 
+plt.tight_layout()
+plt.savefig('similarity_distribution.png', dpi=300, bbox_inches='tight')
+print(" Saved: similarity_distribution.png")
+plt.close()
+ 
+# Figure 2: Feature Comparison
+fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+ 
+for idx, (query_name, results_df) in enumerate(all_results.items()):
+    query_idx = md_clean[md_clean['Facility Name'] == query_name].index[0]
+    query_features = feature_matrix.iloc[query_idx]
+    
+    top_match_name = results_df.iloc[0]['Facility Name']
+    top_match_idx = md_clean[md_clean['Facility Name'] == top_match_name].index[0]
+    top_match_features = feature_matrix.iloc[top_match_idx]
+    top_match_dist = results_df.iloc[0]['Euclidean Distance']
+    
+    x = np.arange(len(feature_cols))
+    width = 0.35
+    
+    axes[idx].bar(x - width/2, query_features, width, 
+                  label='Query Hospital', alpha=0.8, edgecolor='black', color='steelblue')
+    axes[idx].bar(x + width/2, top_match_features, width, 
+                  label=f'Top Match (Distance: {top_match_dist:.2f})', 
+                  alpha=0.8, edgecolor='black', color='coral')
+    
+    axes[idx].set_ylabel('Feature Value', fontsize=11)
+    axes[idx].set_title(f'{query_name} vs {top_match_name}', 
+                        fontsize=12, fontweight='bold')
+    axes[idx].set_xticks(x)
+    axes[idx].set_xticklabels([f'F{i+1}' for i in range(len(feature_cols))], 
+                              fontsize=9, rotation=0)
+    axes[idx].legend(fontsize=10)
+    axes[idx].grid(axis='y', alpha=0.3)
+ 
+plt.tight_layout()
+plt.savefig('feature_comparison.png', dpi=300, bbox_inches='tight')
+print(" Saved: feature_comparison.png")
+plt.close()
+ 
+# 8. SAVE RESULTS
+ 
+print("\n[8/8] Saving results...")
+ 
+# Save distance matrix
+distance_df = pd.DataFrame(distance_matrix, 
+                          index=md_clean['Facility Name'],
+                          columns=md_clean['Facility Name'])
+distance_df.to_csv('distance_matrix.csv')
+print(" Saved: distance_matrix.csv")
+ 
+# Save top 10 for each query
+for query_name, results_df in all_results.items():
+    filename = f"top10_{query_name.replace(' ', '_').replace(',', '').replace('.', '')[:40]}.csv"
+    results_df.to_csv(filename, index=False)
+    print(f" Saved: {filename}")
+ 
+# Save cleaned dataset
+md_clean.to_csv('maryland_hospitals_clean.csv', index=False)
+print(" Saved: maryland_hospitals_clean.csv")
+ 
+# Save rating statistics
+rating_stats.to_csv('rating_similarity_stats.csv', index=False)
+print(" Saved: rating_similarity_stats.csv")
